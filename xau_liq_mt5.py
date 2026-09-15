@@ -39,7 +39,13 @@ import websocket
 
 # --- Binance ---
 BINANCE_SYMBOL   = "xauusdt"   # simbol liquidation feed Binance (huruf kecil)
-WS_URL           = f"wss://fstream.binance.com/ws/{BINANCE_SYMBOL}@forceOrder"
+# Catatan: gunakan domain binancefuture.com (alias resmi fstream.binance.com).
+# Dari beberapa jaringan, domain fstream.binance.com membatasi feed data tertentu
+# (termasuk liquidation), sedangkan alias binancefuture.com lolos.
+WS_HOST          = "fstream.binancefuture.com"
+# Langganan: liquidation XAUUSDT + liquidation semua simbol (untuk visibilitas feed;
+# event simbol lain hanya ditampilkan di log, tidak dieksekusi).
+WS_URL           = f"wss://{WS_HOST}/stream?streams={BINANCE_SYMBOL}@forceOrder/!forceOrder@arr"
 MIN_NOTIONAL_USD = 0.0         # minimal nilai liquidation (qty x harga) agar jadi sinyal; 0 = semua
 SIGNAL_COOLDOWN  = 5.0         # jeda minimal antar event diproses (hindari duplikat partial fill)
 INVERT_SIGNAL    = False       # True = ikuti arah liquidation (BUY-liq -> BUY), False = counter
@@ -257,11 +263,18 @@ def handle_liquidation(payload: dict):
     if not order:
         return
 
+    sym = (order.get("s") or "").upper()
     side = (order.get("S") or "").upper()          # BUY = short kena likuidasi, SELL = long kena likuidasi
     qty = float(order.get("q") or 0)
     avg_price = float(order.get("ap") or order.get("p") or 0)
     status = (order.get("X") or "").upper()
     notional = qty * avg_price
+
+    # Event simbol lain hanya info di log, tidak dieksekusi
+    if sym != BINANCE_SYMBOL.upper():
+        log.info("[feed] Liquidation %s %s $%.0f (bukan %s, dilewati)",
+                 sym, side, notional, BINANCE_SYMBOL.upper())
+        return
 
     if status != "FILLED":
         return
@@ -293,6 +306,8 @@ def on_message(ws, message):
         data = json.loads(message)
     except (ValueError, TypeError):
         return
+    if "stream" in data and isinstance(data.get("data"), dict):
+        data = data["data"]                      # unwrap format combined stream
     if data.get("e") == "forceOrder":
         handle_liquidation(data)
 
