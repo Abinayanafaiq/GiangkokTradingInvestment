@@ -324,6 +324,16 @@ def on_open(ws):
     log.info("Terhubung ke Binance liquidation stream: %s", WS_URL)
 
 
+def _ssl_options():
+    """SSL options: pakai CA bundle certifi (mengenali Amazon CA yang dipakai
+    fstream.binancefuture.com). Fallback ke default bila certifi tidak ada."""
+    try:
+        import certifi
+        return {"ca_certs": certifi.where()}
+    except ImportError:
+        return None
+
+
 def run_ws():
     while True:
         ws = websocket.WebSocketApp(
@@ -334,7 +344,7 @@ def run_ws():
             on_close=on_close,
         )
         try:
-            ws.run_forever(ping_interval=20, ping_timeout=10)
+            ws.run_forever(ping_interval=20, ping_timeout=10, sslopt=_ssl_options())
         except Exception as exc:
             log.error("run_forever exception: %s", exc)
         time.sleep(5)
