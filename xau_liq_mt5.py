@@ -9,11 +9,15 @@ Aturan strategi:
   - Liquidation BUY  di Binance -> kita SELL di MT5
     Liquidation SELL di Binance -> kita BUY  di MT5
     (INVERT_SIGNAL = True untuk membalik arah)
-  - MARTINGALE: setiap event liquidation membuka posisi baru selama cycle belum selesai.
-    Lot bertambah tiap 3 order: 0.05, 0.05, 0.05, 0.06, 0.06, 0.06, 0.07, 0.07, 0.07, ...
+   - MARTINGALE: setiap event liquidation membuka posisi baru selama cycle belum selesai.
+     Lot bertambah tiap 3 order: 0.05, 0.05, 0.05, 0.06, 0.06, 0.06, 0.07, 0.07, 0.07, ...
+   - BLOCK_OPPOSITE: sinyal berlawanan arah dengan cycle yang jalan DILEWATI,
+     supaya tidak ada posisi buy+sell campur yang saling mengunci floating.
   - Take Profit:
       1 posisi terbuka  -> close saat profit posisi >= TP_SINGLE_USD  ($25)
       >= 2 posisi       -> close SEMUA saat total floating >= TP_GLOBAL_USD ($50)
+   - TP per posisi: posisi APAPUN yang profit sendiri >= TP_SINGLE_USD ($25)
+     langsung diclose sendiri, meski posisi lain masih minus (anti-hedge-stuck).
   - Daily loss limit: jika (realized hari ini + floating) <= -DAILY_LOSS_LIMIT ($2000)
     -> close semua posisi, bot berhenti buka order sampai besok (otomatis reset).
   - Cycle baru dimulai otomatis setelah TP global / cut loss (lot kembali 0.05).
@@ -64,6 +68,7 @@ TP_SINGLE_USD    = 25.0        # TP saat hanya 1 posisi terbuka (USD)
 TP_GLOBAL_USD    = 50.0        # TP global saat >= 2 posisi terbuka (USD, total floating)
 DAILY_LOSS_LIMIT = 2000.0      # jika (realized hari ini + floating) <= -nilai ini: cut loss semua + stop sampai besok
 MAX_POSITIONS    = 30          # pengaman: batas jumlah posisi terbuka
+BLOCK_OPPOSITE   = False       # True = sinyal berlawanan arah dengan posisi terbuka dilewati
 DEVIATION        = 50          # slippage maksimal (poin)
 MAGIC_NUMBER     = 90210
 
@@ -155,6 +160,18 @@ def positions_of_bot(mt5):
     if pos is None:
         return []
     return [p for p in pos if p.magic == MAGIC_NUMBER]
+
+
+def bot_direction(mt5):
+    """Arah mayoritas posisi bot yang terbuka: 'buy', 'sell', atau None."""
+    pos = positions_of_bot(mt5)
+    buys = sum(1 for p in pos if p.type == 0)   # POSITION_TYPE_BUY
+    sells = len(pos) - buys
+    if buys > sells:
+        return "buy"
+    if sells > buys:
+        return "sell"
+    return None
 
 
 def calc_realized_today(mt5):
@@ -391,10 +408,25 @@ def monitor_loop(mt5):
             day_pl = _realized_today + floating
 
         # --- Take Profit ---
-        if n == 1 and floating >= TP_SINGLE_USD:
-            log.info("TP SINGLE: profit 1 posisi $%.2f >= $%.2f", floating, TP_SINGLE_USD)
-            close_all(mt5, "TP single")
-        elif n >= 2 and floating >= TP_GLOBAL_USD:
+        # Per posisi: posisi yang profitnya sendiri >= TP_SINGLE_USD diclose sendiri,
+        # tidak tergantung total floating / jumlah posisi lain.
+        if n > 0:
+            closed_any = False
+            for p in positions:
+                pl = p.profit + p.swap
+                if pl >= TP_SINGLE_USD:
+                    log.info("TP POSISI: #%s %s %.2f lot profit $%.2f >= $%.2f -> close sendiri",
+                             p.ticket, "BUY" if p.type == 0 else "SELL", p.volume, pl, TP_SINGLE_USD)
+                    if close_position(mt5, p):
+                        closed_any = True
+            if closed_any:
+                positions = positions_of_bot(mt5)
+                n = len(positions)
+                floating = sum(p.profit + p.swap for p in positions)
+                day_pl = _realized_today + floating
+
+        # TP global: semua posisi diclose saat total floating >= TP_GLOBAL_USD
+        if n >= 2 and floating >= TP_GLOBAL_USD:
             log.info("TP GLOBAL: floating %d posisi $%.2f >= $%.2f", n, floating, TP_GLOBAL_USD)
             close_all(mt5, "TP global")
 
@@ -405,6 +437,12 @@ def monitor_loop(mt5):
             if DRY_RUN:
                 log.info("[DRY RUN] Sinyal %s (%s) -> tidak ada order.", direction.upper(), reason)
                 continue
+            if BLOCK_OPPOSITE and n > 0:
+                cur = bot_direction(mt5)
+                if cur and direction != cur:
+                    log.info("Sinyal %s DILEWATI (berlawanan dengan posisi %s terbuka) - (%s)",
+                             direction.upper(), cur.upper(), reason)
+                    continue
             open_market(mt5, direction, reason)
             opened = True
         if opened:
