@@ -43,9 +43,8 @@ BINANCE_SYMBOL   = "xauusdt"   # simbol liquidation feed Binance (huruf kecil)
 # Dari beberapa jaringan, domain fstream.binance.com membatasi feed data tertentu
 # (termasuk liquidation), sedangkan alias binancefuture.com lolos.
 WS_HOST          = "fstream.binancefuture.com"
-# Langganan: liquidation XAUUSDT + liquidation semua simbol (untuk visibilitas feed;
-# event simbol lain hanya ditampilkan di log, tidak dieksekusi).
-WS_URL           = f"wss://{WS_HOST}/stream?streams={BINANCE_SYMBOL}@forceOrder/!forceOrder@arr"
+# Langganan: hanya liquidation XAUUSDT (event simbol lain tidak dilanggar & tidak di-log).
+WS_URL           = f"wss://{WS_HOST}/stream?streams={BINANCE_SYMBOL}@forceOrder"
 MIN_NOTIONAL_USD = 0.0         # minimal nilai liquidation (qty x harga) agar jadi sinyal; 0 = semua
 SIGNAL_COOLDOWN  = 5.0         # jeda minimal antar event diproses (hindari duplikat partial fill)
 INVERT_SIGNAL    = False       # True = ikuti arah liquidation (BUY-liq -> BUY), False = counter
@@ -270,15 +269,22 @@ def handle_liquidation(payload: dict):
     status = (order.get("X") or "").upper()
     notional = qty * avg_price
 
-    # Event simbol lain hanya info di log, tidak dieksekusi
+    # Event simbol lain diabaikan total (tidak di-log agar tidak spam)
     if sym != BINANCE_SYMBOL.upper():
-        log.info("[feed] Liquidation %s %s $%.0f (bukan %s, dilewati)",
-                 sym, side, notional, BINANCE_SYMBOL.upper())
         return
 
     if status != "FILLED":
         return
-    if notional < MIN_NOTIONAL_USD:
+
+    event_time = datetime.fromtimestamp(
+        (order.get("T") or time.time() * 1000) / 1000).strftime("%Y-%m-%d %H:%M:%S")
+    passed = notional >= MIN_NOTIONAL_USD
+
+    log.info("Liquidation %s %s | jam=%s | qty=%.3f | notional=$%.0f | threshold=$%.0f -> %s",
+             sym, side, event_time, qty, notional, MIN_NOTIONAL_USD,
+             "ORDER AKTIF" if passed else "di bawah threshold, order tidak dibuka")
+
+    if not passed:
         return
 
     now = time.time()
@@ -292,9 +298,7 @@ def handle_liquidation(payload: dict):
     else:
         direction = "sell" if side == "BUY" else "buy"
 
-    reason = f"liq {side} ${notional:,.0f}"
-    log.info("Liquidation: %s %s qty=%s price=%s notional=$%.0f -> sinyal %s",
-             order.get("s"), side, qty, avg_price, notional, direction.upper())
+    reason = f"liq {side} ${notional:,.0f} qty={qty:.3f}"
     try:
         signal_queue.put_nowait((direction, reason))
     except queue.Full:
