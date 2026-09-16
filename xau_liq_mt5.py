@@ -85,7 +85,6 @@ _state = {"date": date.today().isoformat(), "stopped": False}
 _realized_today = 0.0
 _last_realized_calc = 0.0
 _last_signal_time = 0.0
-_last_status_log = 0.0
 
 
 # ------------------------------ State harian ------------------------------
@@ -358,7 +357,7 @@ def run_ws():
 
 def monitor_loop(mt5):
     """Loop utama: kelola TP, daily loss limit, dan buka posisi dari antrian sinyal."""
-    global _realized_today, _last_realized_calc, _last_status_log
+    global _realized_today, _last_realized_calc
 
     while True:
         today = date.today().isoformat()
@@ -412,14 +411,6 @@ def monitor_loop(mt5):
             n = len(positions_of_bot(mt5))
             floating = sum(p.profit + p.swap for p in positions_of_bot(mt5))
             day_pl = _realized_today + floating
-
-        # --- Status berkala ---
-        if time.time() - _last_status_log >= 30:
-            _last_status_log = time.time()
-            next_lot_preview = next_lot(n)
-            status = "STOP (lanjut besok)" if _state["stopped"] else "aktif"
-            log.info("Status [%s] posisi=%d floating=$%.2f realized_today=$%.2f day_pl=$%.2f lot_berikutnya=%.2f",
-                     status, n, floating, _realized_today, day_pl, next_lot_preview)
 
         time.sleep(1)
 
